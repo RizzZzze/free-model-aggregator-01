@@ -71,20 +71,6 @@ const UPSTREAM_TIMEOUT_MS = 5000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 /** The anthropic-version sent upstream when the client sent none. */
 const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
-/** Per-provider caps on planned first-choice calls (assign.ts), from the kit's published budget ranges. Fail numbers are 1-2 draws in [2, budget-1], so a small-budget provider's call #2 usually refuses while a big-budget provider stays safe deeper: zai/sambanova (4-5) get 1 planned call, the 5-8 range gets 2, the 9-16 range gets 3. */
-const RISK_CAPS = new Map([
-  ['zai', 1],
-  ['sambanova', 1],
-  ['cerebras', 2],
-  ['ovh', 2],
-  ['gemini', 2],
-  ['cloudflare', 2],
-  ['groq', 3],
-  ['openrouter', 3],
-  ['pollinations', 3],
-  ['kilol', 3],
-]);
-
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
 const PROMPT_FILE = process.env.MAKEFUN_PROMPT_FILE ?? '';
 
@@ -93,7 +79,7 @@ const catalog: CatalogReport = brief.error === null ? catalogFromBrief(brief) : 
 const planState: PlanState = newPlanState();
 /** The upfront first-choice plan, from the brief's manifest alone (empty when the brief failed). */
 const assignment =
-  brief.error === null && brief.workload !== null ? planAssignment(brief, brief.workload.manifest, RISK_CAPS) : new Map();
+  brief.error === null && brief.workload !== null ? planAssignment(brief, brief.workload.manifest) : new Map();
 /** How many client API requests have arrived: the manifest is in arrival order, one request at a time. */
 let manifestIndex = 0;
 
