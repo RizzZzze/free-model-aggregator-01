@@ -157,14 +157,17 @@ async function serveRequest(wire: ClientWire, body: Json, anthropicVersion: stri
   const candidates = candidatesFor(brief, requires, canon.jsonMode !== null, visionRemaining, planState);
   const directory = new Map(brief.directory.providers.map((p) => [p.id, p]));
   const requested = typeof body.model === 'string' && body.model !== '' ? body.model : 'auto';
+  let attempts = 0;
   for (const candidate of candidates) {
     const provider = directory.get(candidate.providerId);
     if (provider === undefined) continue;
     const upstreamBody =
       candidate.wire === 'openai' ? toOpenAI(canon, candidate.model) : candidate.wire === 'anthropic' ? toAnthropic(canon, candidate.model) : toGemini(canon);
     recordCall(planState, candidate.providerId);
+    attempts += 1;
     const outcome = await callUpstream(ENV_URL, provider, candidate.model, candidate.wire, upstreamBody, anthropicVersion, UPSTREAM_TIMEOUT_MS);
     if (outcome.kind === 'ok') {
+      log(`request ${index + 1}: ${candidate.providerId}/${candidate.model} after ${attempts} call(s)`);
       const answer = extractAnswer(candidate.wire, outcome.json);
       if (canon.stream) {
         const text =
@@ -248,6 +251,8 @@ function poll(server: Server): void {
         const work: unknown = await res.json();
         if (isRecord(work) && work.done === true) {
           clearInterval(timer);
+          const totals = [...planState.calls.entries()].map(([id, n]) => `${id} ${n} calls/${planState.refusals.get(id) ?? 0} refused`).join(', ');
+          log(`done: ${totals}`);
           server.close();
           process.exit(0);
         }
