@@ -29,6 +29,9 @@
 //   lib/catalog.ts     the catalog and the served-model list, from the brief.
 //   lib/assign.ts      the upfront first-choice plan: one planned provider per
 //                      manifest request, capped per provider to keep calls low.
+//   lib/belief.ts      the Bayesian belief over each provider's hidden draw,
+//                      narrowed by every counted call's outcome; it orders
+//                      failover retries safest-first.
 //   lib/plan.ts        the candidate order and the refusal-learned state.
 //   lib/translate.ts   request translation across wires, answer extraction.
 //   lib/render.ts      client JSON and synthesized SSE, both wires.
@@ -37,6 +40,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { planAssignment } from './lib/assign.ts';
+import { currentDepths, newBelief, observe, refusalProb, type Belief } from './lib/belief.ts';
 import { catalogFromBrief, servedModels } from './lib/catalog.ts';
 import { candidatesFor, newPlanState, recordCall, recordRefusal, type PlanState } from './lib/plan.ts';
 import {
@@ -77,6 +81,8 @@ const PROMPT_FILE = process.env.MAKEFUN_PROMPT_FILE ?? '';
 const brief: Brief = readBrief(PROMPT_FILE);
 const catalog: CatalogReport = brief.error === null ? catalogFromBrief(brief) : { providers: [] };
 const planState: PlanState = newPlanState();
+/** The belief over each provider's hidden draw, updated by every counted call's outcome; it orders failover retries safest-first. */
+const belief: Belief = newBelief();
 /** The upfront first-choice plan, from the brief's manifest alone (empty when the brief failed). */
 const assignment =
   brief.error === null && brief.workload !== null ? planAssignment(brief, brief.workload.manifest) : new Map();
@@ -159,7 +165,16 @@ async function serveRequest(wire: ClientWire, body: Json, anthropicVersion: stri
   const { requires, index } = requirementsFor(body);
   const manifest = brief.workload?.manifest ?? [];
   const visionRemaining = manifest.slice(index + 1).some((r) => r.requires.vision === true);
-  const candidates = candidatesFor(brief, requires, canon.jsonMode !== null, visionRemaining, planState);
+  const depths = currentDepths(belief);
+  const probCache = new Map<string, number>();
+  const probFn = (providerId: string): number => {
+    const hit = probCache.get(providerId);
+    if (hit !== undefined) return hit;
+    const p = refusalProb(belief, providerId, (depths.get(providerId) ?? 0) + 1);
+    probCache.set(providerId, p);
+    return p;
+  };
+  const candidates = candidatesFor(brief, requires, canon.jsonMode !== null, visionRemaining, planState, probFn);
   // The upfront plan picks the first try: spread planned calls keep every
   // provider shallow. A provider refused twice is likely out, so the plan
   // yields to the tier order for it; a planned choice missing from the
@@ -184,6 +199,7 @@ async function serveRequest(wire: ClientWire, body: Json, anthropicVersion: stri
     attempts += 1;
     const outcome = await callUpstream(ENV_URL, provider, candidate.model, candidate.wire, upstreamBody, anthropicVersion, UPSTREAM_TIMEOUT_MS);
     if (outcome.kind === 'ok') {
+      observe(belief, candidate.providerId, false);
       log(`request ${index + 1}: ${candidate.providerId}/${candidate.model} after ${attempts} call(s)`);
       const answer = extractAnswer(candidate.wire, outcome.json);
       if (canon.stream) {
@@ -206,6 +222,7 @@ async function serveRequest(wire: ClientWire, body: Json, anthropicVersion: stri
     }
     if (outcome.kind === 'refused') {
       recordRefusal(planState, candidate.providerId);
+      observe(belief, candidate.providerId, true);
       log(`${candidate.providerId} refused (HTTP ${outcome.status}); failing over`);
     } else {
       log(`upstream error: ${outcome.message}; failing over`);

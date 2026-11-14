@@ -45,7 +45,7 @@ function eligibleCandidates(brief: Brief, requires: Requirement): Candidate[] {
 }
 
 /** Published per-provider budget ranges from the kit's env code (server.mjs PROVIDERS table). */
-const BUDGET_RANGE: Record<string, [number, number]> = {
+export const BUDGET_RANGE: Record<string, [number, number]> = {
   groq: [9, 12],
   cerebras: [5, 6],
   gemini: [6, 8],

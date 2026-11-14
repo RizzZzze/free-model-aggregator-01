@@ -56,7 +56,13 @@ function tierOf(state: PlanState, providerId: string): number {
 /**
  * The failover-ordered candidates for one request. `jsonMode` excludes the
  * anthropic wire; `visionRemaining` reserves the gemini provider for the
- * vision requests still to come (its candidates move to the end).
+ * vision requests still to come (its candidates move to the end). When
+ * `probFn` is given (the belief posterior's refusal probability at each
+ * provider's next depth), candidates within 30 rating points of the list's
+ * best are ordered safest-first inside each tier: a retry that lands on a
+ * known-likely fail number wastes a call, while the 30-point band bounds
+ * the quality cost of the safer pick (bands 10/20 cost more calls, 40
+ * breaches quality on some draws).
  */
 export function candidatesFor(
   brief: Brief,
@@ -64,6 +70,7 @@ export function candidatesFor(
   jsonMode: boolean,
   visionRemaining: boolean,
   state: PlanState,
+  probFn?: (providerId: string) => number,
 ): Candidate[] {
   const directory = new Map(brief.directory.providers.map((p) => [p.id, p]));
   const rows: RatingRow[] = brief.ratings?.ratings ?? [];
@@ -84,8 +91,25 @@ export function candidatesFor(
     const tier = tierOf(state, a.providerId) - tierOf(state, b.providerId);
     return tier !== 0 ? tier : compareCandidates(a, b);
   };
-  main.sort(byTierThenQuality);
-  reserve.sort(byTierThenQuality);
+  const byTierBandProb = (list: Candidate[]) => (a: Candidate, b: Candidate): number => {
+    const tier = tierOf(state, a.providerId) - tierOf(state, b.providerId);
+    if (tier !== 0) return tier;
+    const top = Math.max(...list.map((c) => c.rating));
+    const aIn = a.rating >= top - 30 ? 0 : 1;
+    const bIn = b.rating >= top - 30 ? 0 : 1;
+    if (aIn !== bIn) return aIn - bIn;
+    const pa = probFn === undefined ? 0 : probFn(a.providerId);
+    const pb = probFn === undefined ? 0 : probFn(b.providerId);
+    if (pa !== pb) return pa - pb;
+    return compareCandidates(a, b);
+  };
+  if (probFn !== undefined) {
+    main.sort(byTierBandProb(main));
+    reserve.sort(byTierBandProb(reserve));
+  } else {
+    main.sort(byTierThenQuality);
+    reserve.sort(byTierThenQuality);
+  }
   return [...main, ...reserve];
 }
 
