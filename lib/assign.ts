@@ -87,7 +87,11 @@ const LAMBDA = 0.0005;
  * quality loss (best rating minus the candidate's, times the request weight).
  * Depth-1 slots cost nothing, depth-2 on a small-budget provider costs more
  * than depth-3 on a big one, so the plan spends safe slots first and trades
- * rating for safety only where the cost says it is worth it.
+ * rating for safety only where the cost says it is worth it. The greedy
+ * result is then refined by local search (see refineAssignment): the greedy
+ * prices depths in assignment order, but the trial runs requests in
+ * manifest order, and the refinement prices the assignment the way it
+ * actually runs.
  */
 export function planAssignment(brief: Brief, rows: PlannedRequest[]): Map<number, Candidate> {
   const perRow: Candidate[][] = rows.map((r) => eligibleCandidates(brief, r.requires));
@@ -116,5 +120,80 @@ export function planAssignment(brief: Brief, rows: PlannedRequest[]): Map<number
     assignment.set(i, chosen);
     depth.set(chosen.providerId, (depth.get(chosen.providerId) ?? 0) + 1);
   }
-  return assignment;
+  return refineAssignment(rows, perRow, assignment, failProb, LAMBDA);
+}
+
+/**
+ * Local search over the greedy assignment. The objective prices every
+ * request at the depth it would actually occupy: requests run in manifest
+ * order, so a request's depth on its provider is 1 plus the number of
+ * EARLIER rows assigned to the same provider. Moves are single-row
+ * reassignments and pairwise swaps (only where each candidate is eligible
+ * for the other's row); first improvement wins, in a fixed order, so the
+ * result is deterministic. Twenty passes cap the work; the loop stops at
+ * the first pass with no improving move.
+ */
+function refineAssignment(
+  rows: PlannedRequest[],
+  perRow: Candidate[][],
+  assignment: Map<number, Candidate>,
+  failProbFn: (providerId: string, depth: number) => number,
+  lambda: number,
+): Map<number, Candidate> {
+  const bests = perRow.map((cs) => (cs.length === 0 ? 0 : Math.max(...cs.map((c) => c.rating))));
+  const costOf = (a: Map<number, Candidate>): number => {
+    const depth = new Map<string, number>();
+    let total = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const c = a.get(i);
+      if (c === undefined) continue;
+      const d = (depth.get(c.providerId) ?? 0) + 1;
+      depth.set(c.providerId, d);
+      total += failProbFn(c.providerId, d) + lambda * rows[i].weight * Math.max(0, bests[i] - c.rating);
+    }
+    return total;
+  };
+  const out = new Map(assignment);
+  let cost = costOf(out);
+  for (let pass = 0; pass < 20; pass++) {
+    let improved = false;
+    for (let i = 0; i < rows.length; i++) {
+      const cur = out.get(i);
+      if (cur === undefined) continue;
+      for (const c of perRow[i]) {
+        if (c.providerId === cur.providerId && c.model === cur.model) continue;
+        const trial = new Map(out);
+        trial.set(i, c);
+        const tc = costOf(trial);
+        if (tc < cost - 1e-12) {
+          out.set(i, c);
+          cost = tc;
+          improved = true;
+        }
+      }
+    }
+    for (let i = 0; i < rows.length; i++) {
+      for (let j = i + 1; j < rows.length; j++) {
+        const ci = out.get(i);
+        const cj = out.get(j);
+        if (ci === undefined || cj === undefined) continue;
+        if (ci.providerId === cj.providerId && ci.model === cj.model) continue;
+        const eligibleI = perRow[i].some((c) => c.providerId === cj.providerId && c.model === cj.model);
+        const eligibleJ = perRow[j].some((c) => c.providerId === ci.providerId && c.model === ci.model);
+        if (!eligibleI || !eligibleJ) continue;
+        const trial = new Map(out);
+        trial.set(i, cj);
+        trial.set(j, ci);
+        const tc = costOf(trial);
+        if (tc < cost - 1e-12) {
+          out.set(i, cj);
+          out.set(j, ci);
+          cost = tc;
+          improved = true;
+        }
+      }
+    }
+    if (!improved) break;
+  }
+  return out;
 }
