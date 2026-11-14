@@ -37,7 +37,7 @@ export function newPlanState(): PlanState {
 
 const WIRE_ORDER: Record<Wire, number> = { openai: 0, gemini: 1, anthropic: 2 };
 
-function compareCandidates(a: Candidate, b: Candidate): number {
+export function compareCandidates(a: Candidate, b: Candidate): number {
   if (a.rating !== b.rating) return b.rating - a.rating;
   if (WIRE_ORDER[a.wire] !== WIRE_ORDER[b.wire]) return WIRE_ORDER[a.wire] - WIRE_ORDER[b.wire];
   if (a.providerId !== b.providerId) return a.providerId < b.providerId ? -1 : 1;

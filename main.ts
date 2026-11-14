@@ -27,6 +27,8 @@
 //   lib/providers.ts   the brief's types and parser, the auth headers, the
 //                      capability matcher (from the kit's starter, kept).
 //   lib/catalog.ts     the catalog and the served-model list, from the brief.
+//   lib/assign.ts      the upfront first-choice plan: one planned provider per
+//                      manifest request, capped per provider to keep calls low.
 //   lib/plan.ts        the candidate order and the refusal-learned state.
 //   lib/translate.ts   request translation across wires, answer extraction.
 //   lib/render.ts      client JSON and synthesized SSE, both wires.
@@ -34,6 +36,7 @@
 //   LICENSE            MIT.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { planAssignment } from './lib/assign.ts';
 import { catalogFromBrief, servedModels } from './lib/catalog.ts';
 import { candidatesFor, newPlanState, recordCall, recordRefusal, type PlanState } from './lib/plan.ts';
 import {
@@ -68,6 +71,19 @@ const UPSTREAM_TIMEOUT_MS = 5000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 /** The anthropic-version sent upstream when the client sent none. */
 const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
+/** Per-provider caps on planned first-choice calls (assign.ts), from the kit's published budget ranges. Fail numbers are 1-2 draws in [2, budget-1], so a small-budget provider's call #2 usually refuses while a big-budget provider stays safe deeper: zai/sambanova (4-5) get 1 planned call, the 5-8 range gets 2, the 9-16 range gets 3. */
+const RISK_CAPS = new Map([
+  ['zai', 1],
+  ['sambanova', 1],
+  ['cerebras', 2],
+  ['ovh', 2],
+  ['gemini', 2],
+  ['cloudflare', 2],
+  ['groq', 3],
+  ['openrouter', 3],
+  ['pollinations', 3],
+  ['kilol', 3],
+]);
 
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
 const PROMPT_FILE = process.env.MAKEFUN_PROMPT_FILE ?? '';
@@ -75,6 +91,9 @@ const PROMPT_FILE = process.env.MAKEFUN_PROMPT_FILE ?? '';
 const brief: Brief = readBrief(PROMPT_FILE);
 const catalog: CatalogReport = brief.error === null ? catalogFromBrief(brief) : { providers: [] };
 const planState: PlanState = newPlanState();
+/** The upfront first-choice plan, from the brief's manifest alone (empty when the brief failed). */
+const assignment =
+  brief.error === null && brief.workload !== null ? planAssignment(brief, brief.workload.manifest, RISK_CAPS) : new Map();
 /** How many client API requests have arrived: the manifest is in arrival order, one request at a time. */
 let manifestIndex = 0;
 
@@ -155,6 +174,18 @@ async function serveRequest(wire: ClientWire, body: Json, anthropicVersion: stri
   const manifest = brief.workload?.manifest ?? [];
   const visionRemaining = manifest.slice(index + 1).some((r) => r.requires.vision === true);
   const candidates = candidatesFor(brief, requires, canon.jsonMode !== null, visionRemaining, planState);
+  // The upfront plan picks the first try: spread planned calls keep every
+  // provider shallow. A provider refused twice is likely out, so the plan
+  // yields to the tier order for it; a planned choice missing from the
+  // filtered list (JSON mode, reserve) simply stays unmoved.
+  const assigned = assignment.get(index);
+  if (assigned !== undefined && (planState.refusals.get(assigned.providerId) ?? 0) < 2) {
+    const at = candidates.findIndex((c) => c.providerId === assigned.providerId && c.model === assigned.model);
+    if (at > 0) {
+      const [first] = candidates.splice(at, 1);
+      candidates.unshift(first);
+    }
+  }
   const directory = new Map(brief.directory.providers.map((p) => [p.id, p]));
   const requested = typeof body.model === 'string' && body.model !== '' ? body.model : 'auto';
   let attempts = 0;
